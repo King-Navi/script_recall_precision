@@ -1,0 +1,26 @@
+[project]
+name = "searching"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "King-Navi",email = "168604098+King-Navi@users.noreply.github.com"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pandas (>=2.3.3,<3.0.0)",
+    "bibtexparser (>=1.4.3,<2.0.0)"
+]
+
+
+
+[tool.poetry]
+packages = [
+    { include = "const", from = "src" },
+    { include = "readers", from = "src" },
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
