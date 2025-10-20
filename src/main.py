@@ -1,29 +1,65 @@
 import argparse
-import glob
+import os
+import sys
+from .readers.bib_reader import normalize_bib_dir, dump_ndjson, read_bib_file
 
-from .readers.bib_reader import read_dir
+
+
+def ensure_parent_dir(path: str):
+    parent = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(parent, exist_ok=True)
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="dataset-tool", description="Process datasets (BibTeX/CSV).")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    # bib subcommand
+    pb = sub.add_parser("bib", help="Process BibTeX inputs")
+    gb = pb.add_mutually_exclusive_group(required=True)
+    gb.add_argument("--dir", dest="in_dir", help="Directory with .bib files")
+    gb.add_argument("--file", dest="in_file", help="Single .bib file")
+    pb.add_argument("--out", required=True, help="Output NDJSON file")
+
+    # csv subcommand (placeholder)
+    pcsv = sub.add_parser("csv", help="Process CSV inputs")
+    gc = pcsv.add_mutually_exclusive_group(required=True)
+    gc.add_argument("--dir", dest="in_dir", help="Directory with .csv files")
+    gc.add_argument("--file", dest="in_file", help="Single .csv file")
+    pcsv.add_argument("--out", required=True, help="Output file (TBD)")
+
+    return p
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.cmd == "bib":
+        if args.in_dir:
+            if not os.path.isdir(args.in_dir):
+                print(f"[ERROR] Directory not found: {args.in_dir}", file=sys.stderr)
+                sys.exit(2)
+            entries = normalize_bib_dir(args.in_dir)
+        else:
+            if not os.path.isfile(args.in_file):
+                print(f"[ERROR] File not found: {args.in_file}", file=sys.stderr)
+                sys.exit(2)
+            entries = read_bib_file(args.in_file)
+
+        ensure_parent_dir(args.out)
+        dump_ndjson(entries, args.out)
+        print(f"Saved {len(entries)} entries -> {args.out}")
+
+    elif args.cmd == "csv":
+        print("[WARN] CSV flow not implemented yet.", file=sys.stderr)
+        sys.exit(4)
+
 """
-PYTHONPATH=src poetry run python -m src.main
+PYTHONPATH=src poetry run python -m src.main \
+    bib \
+    --dir /home/ivan/Downloads/cadenas/input/sciencedirect \
+    --out /home/ivan/Downloads/cadenas/output/entries.ndjson \
+    
+
 """
 
-def args_init():
-    ap = argparse.ArgumentParser()
-    group = ap.add_mutually_exclusive_group(required=True)
-    group.add_argument("--filecvs", help="Path to one CSV file")
-    group.add_argument("--pathcvs", help="Directory with cvs")
-        
-    ap.add_argument("--out_dir", required=True, help="Output directory for predictions")
-    # ap.add_argument("--size", type=int, default=512, help="Resize used in training")
-    # ap.add_argument("--in_ch", type=int, default=1)
-    # ap.add_argument("--out_ch", type=int, default=2)
-    # ap.add_argument("--string", type=str, default=None, help="If you used a custom NAS string")
-    # ap.add_argument("--overlay", action="store_true", help="Save color overlay")
-    # ap.add_argument("--overlay_alpha", type=float, default=0.35)
-    # ap.add_argument("--overlay_color", type=str, default="0,0,255", help="B,G,R (OpenCV order)")
-    args = ap.parse_args()
-
-if __name__ == '__main__':
-    #args_init()
-    read_dir()
-
-
+if __name__ == "__main__":
+    main()

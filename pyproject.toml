@@ -16,6 +16,7 @@ dependencies = [
 
 [tool.poetry]
 packages = [
+    { include = "src"},
     { include = "const", from = "src" },
     { include = "readers", from = "src" },
 ]
