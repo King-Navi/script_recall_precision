@@ -10,10 +10,113 @@ import bibtexparser
 from bibtexparser.bparser import BibTexParser
 from bibtexparser.customization import convert_to_unicode
 
+import csv
+
+from datetime import datetime
+
 import re
 
 DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)
 
+def _get_row_val(row, *candidates: str):
+    """
+    Acceso case-insensitive y con tolerancia a espacios en el header.
+    """
+    norm = {re.sub(r"\s+", " ", k.strip().lower()): v for k, v in row.items()}
+    for cand in candidates:
+        key = re.sub(r"\s+", " ", cand.strip().lower())
+        if key in norm:
+            val = norm[key]
+            if val is not None and str(val).strip() != "":
+                return str(val).strip()
+    return None
+
+def _has_springer_headers(fieldnames: list[str]) -> bool:
+    if not fieldnames:
+        return False
+    norm = {re.sub(r"\s+", " ", (f or "").strip().lower()) for f in fieldnames}
+    return ("item title" in norm or "title" in norm) and ("item doi" in norm or "doi" in norm)
+
+def _has_ieee_headers(fieldnames: list[str]) -> bool:
+    if not fieldnames:
+        return False
+    norm = {re.sub(r"\s+", " ", (f or "").strip().lower()) for f in fieldnames}
+    # IEEE Xplore típicos
+    return ("document title" in norm) and ("publication year" in norm or "year" in norm) and ("doi" in norm)
+
+def _extract_row_springer(row):
+    title = _get_row_val(row, "Item Title", "Title")
+    year  = _get_row_val(row, "Publication Year", "Year")
+    doi   = _get_row_val(row, "Item DOI", "DOI")
+    return title, year, doi
+
+def _extract_row_ieee(row):
+    title = _get_row_val(row, "Document Title", "Title")
+    year  = _get_row_val(row, "Publication Year", "Year")
+    doi   = _get_row_val(row, "DOI")
+    return title, year, doi
+
+def parse_csv_dir(csv_dir: str, extensions: tuple[str, ...] = (".csv", ".tsv")):
+    """
+    CSV/TSV → conjuntos equivalentes a parse_bib_dir
+    Soporta SpringerLink e IEEE Xplore (auto-detección por headers).
+    Returns:
+      - retrieved_ids: set canonical (doi:... o fallback_id)
+      - retrieved_dois: set de DOIs
+      - detail: lista dicts {id, doi, title, year, source_file}
+    """
+    retrieved_ids = set()
+    retrieved_dois = set()
+    detail = []
+
+    for name in os.listdir(csv_dir):
+        if not name.lower().endswith(extensions):
+            continue
+        path = os.path.join(csv_dir, name)
+        try:
+            with open(path, "r", encoding="utf-8-sig", newline="") as f:
+                sample = f.read(4096)
+                f.seek(0)
+                try:
+                    dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
+                except Exception:
+                    dialect = csv.excel_tab if name.lower().endswith(".tsv") else csv.excel
+
+                reader = csv.DictReader(f, dialect=dialect)
+                fns = reader.fieldnames or []
+
+                if _has_springer_headers(fns):
+                    extractor = _extract_row_springer
+                elif _has_ieee_headers(fns):
+                    extractor = _extract_row_ieee
+                else:
+                    print(f"[WARN] Skipping {name}: headers not recognized as Springer/IEEE")
+                    continue
+
+                for row in reader:
+                    try:
+                        title, year, doi_raw = extractor(row)
+                        doi = clean_doi(doi_raw)
+                        if doi:
+                            cid = f"doi:{doi}"
+                            retrieved_dois.add(doi)
+                        else:
+                            cid = fallback_id(title, year)
+
+                        retrieved_ids.add(cid)
+                        detail.append({
+                            "id": cid,
+                            "doi": doi,
+                            "title": title,
+                            "year": year,
+                            "source_file": name,
+                        })
+                    except Exception as ex:
+                        print(f"[WARN] Skipped row in {name}: {ex}")
+        except Exception as ex:
+            print(f"[WARN] Failed to parse {name}: {ex}")
+
+    return retrieved_ids, retrieved_dois, detail
 
 def clean_doi(doi):
     if not doi:
@@ -128,33 +231,34 @@ def load_relevant(args):
     sys.exit(2)
 
 
-def compute_metrics(bibs_dir, relevant_source, out_path=None, count_duplicates=False):
-    retrieved_ids, retrieved_dois, detail = parse_bib_dir(bibs_dir)
-    relevant_dois = load_relevant(relevant_source)
+def compute_metrics(args, out_path=None, count_duplicates=False):
+    # 1) Cargar resultados desde la fuente seleccionada
+    if args.bibs_dir:
+        retrieved_ids, retrieved_dois, detail = parse_bib_dir(args.bibs_dir)
+        input_dir = args.bibs_dir
+    else:
+        retrieved_ids, retrieved_dois, detail = parse_csv_dir(args.csv_dir)
+        input_dir = args.csv_dir
 
+    # 2) Cargar relevantes (lista objetivo)
+    relevant_dois = load_relevant(args)
+
+    # 3) Métricas base
     ID = len(detail)
-    TE = len(retrieved_ids)     # Total de estudios obtenidos
-    TE_doi = len(retrieved_dois)# Unicos con DOI
-    ER = len(relevant_dois)     # Total de estudios relevantes (tu lista objetivo)
-    TER_dois = relevant_dois.intersection(retrieved_dois)  # relevantes recuperados (por DOI)
+    TE = len(retrieved_ids)
+    TE_doi = len(retrieved_dois)
+    ER = len(relevant_dois)
+    TER_dois = relevant_dois.intersection(retrieved_dois)
     TER = len(TER_dois)
 
-    # Falsos/faltantes por DOI (para auditoría)
-
-    #(False Negatives / Faltantes) = Relevantes que NO se recuperaron.
     FN = relevant_dois.difference(retrieved_dois)
-    
-    #FP (False Positives / No relevantes) = Recuperados que NO están en tu lista relevante.
     FP = retrieved_dois.difference(relevant_dois)
-    
-    # Métricas (Zhang 2011):
-    # RC = TER / ER
+
     RC = 0.0 if ER == 0 else (TER / ER) * 100.0
-    # EF = TER / TE
     EF = 0.0 if TE == 0 else (TER / TE) * 100.0
 
     report = {
-        "CB": getattr(relevant_source, "cb", None),
+        "CB": getattr(args, "cb", None),
         "ID": ID,
         "TE": TE,
         "TE_doi": TE_doi,
@@ -162,12 +266,9 @@ def compute_metrics(bibs_dir, relevant_source, out_path=None, count_duplicates=F
         "TER": TER,
         "EF_percent": round(EF, 2),
         "RC_percent": round(RC, 2),
-
         "TP_dois": sorted(TER_dois),
         "FN_dois": sorted(FN),
         "FP_dois": sorted(FP),
-
-        # Claves significado
         "total_relevant": ER,
         "relevant_retrieved": TER,
         "studies_retrieved": TE,
@@ -184,11 +285,15 @@ def compute_metrics(bibs_dir, relevant_source, out_path=None, count_duplicates=F
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
 
-    return report
+    return report, input_dir, detail
 
 def build_parser():
     p = argparse.ArgumentParser(description="Compute Zhang (2011) Sensitivity & Precision for a search.")
-    p.add_argument("--bibs-dir", required=True, help="Directory containing .bib files (results).")
+    
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--bibs-dir", help="Directory containing .bib files (results).")
+    src.add_argument("--csv-dir",  help="Directory containing SpringerLink CSV/TSV files (results).")
+
 
     tg = p.add_mutually_exclusive_group(required=True)
     tg.add_argument("--targets-file", help="Text file containing your relevant studies list (any format; DOIs will be extracted).")
@@ -199,13 +304,65 @@ def build_parser():
     p.add_argument("--out", help="Optional JSON report path.")
     return p
 
+def resolve_output_path(out_arg: str | None, bibs_dir: str) -> str:
+    """
+    Returns a unique JSON file path.
+    - If out_arg is None: create <bibs_dir>/reports/report_<timestamp>.json
+    - If out_arg is an existing directory: put report_<timestamp>.json inside it
+    - If out_arg looks like a file path: append _<timestamp> before extension
+      (and add numeric suffix if still collides)
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    def ensure_dir(d: str):
+        os.makedirs(d, exist_ok=True)
+
+    # Case A: no --out provided → default dir inside bibs_dir
+    if out_arg is None:
+        base_dir = os.path.join(os.path.abspath(bibs_dir), "reports")
+        ensure_dir(base_dir)
+        return os.path.join(base_dir, f"report_{ts}.json")
+
+    # Case B: --out is a directory
+    if os.path.isdir(out_arg):
+        base_dir = os.path.abspath(out_arg)
+        ensure_dir(base_dir)
+        return os.path.join(base_dir, f"report_{ts}.json")
+
+    # Case C: --out looks like a file path
+    base_dir = os.path.dirname(out_arg) or "."
+    base_name = os.path.basename(out_arg)
+    root, ext = os.path.splitext(base_name)
+    if not ext:
+        ext = ".json"
+
+    ensure_dir(base_dir)
+
+    candidate = os.path.join(base_dir, f"{root}_{ts}{ext}")
+    if not os.path.exists(candidate):
+        return candidate
+
+    i = 2
+    while True:
+        cand = os.path.join(base_dir, f"{root}_{ts}_{i}{ext}")
+        if not os.path.exists(cand):
+            return cand
+        i += 1
 
 def main():
     parser = build_parser()
     args = parser.parse_args()
     setattr(args, "cb", args.cb)
+    
+    if args.targets_file and not os.path.isfile(args.targets_file):
+        print(f"[ERROR] targets file not found: {args.targets_file}", file=sys.stderr)
+        sys.exit(2)
+    
+    base_input_dir = args.bibs_dir or args.csv_dir
+    out_path = resolve_output_path(args.out, base_input_dir)
 
-    report = compute_metrics(args.bibs_dir, args, out_path=args.out)
+    report, input_dir_used, detail = compute_metrics(args, out_path=out_path)
+
 
     print("\n=== Zhang (2011) Metrics ===")
     if report.get("CB"):
@@ -232,10 +389,25 @@ def main():
         for d in report["TP_dois"]:
             print("  -", d)
     if args.out:
-        print(f"\nSaved JSON report -> {args.out}")
+        print(f"\nSaved JSON report -> {out_path}")
 
 
 """
+---
+ACM
+---
+
+PYTHONPATH=src \
+poetry run python -m src.zhang_metrics \
+  --bibs-dir /home/ivan/Downloads/cadenas/input/acm \
+  --targets-file /home/ivan/Downloads/cadenas/input/acm/target.txt \
+  --cb '("test case generation" OR "test data generation") AND ("multi-objective" OR "multiple objectives" OR Pareto) AND ("Search-Based Software Testing" OR SBST)' \
+  --out /home/ivan/Downloads/cadenas/output/acm/
+
+  
+
+
+
 ---
 ScienceDirect
 ---
@@ -244,7 +416,32 @@ PYTHONPATH=src \
 poetry run python -m src.zhang_metrics \
   --bibs-dir /home/ivan/Downloads/cadenas/input/sciencedirect \
   --targets-file /home/ivan/Downloads/cadenas/input/sciencedirect/target.txt \
-  --out /home/ivan/Downloads/cadenas/output/sciencedirect/report.json
+  --cb '' \
+  --out /home/ivan/Downloads/cadenas/output/sciencedirect/
+
+  
+
+---
+SpringerLink
+---
+
+
+PYTHONPATH=src \
+poetry run python -m src.zhang_metrics \
+  --csv-dir /home/ivan/Downloads/cadenas/input/springerlink/ \
+  --targets-file /home/ivan/Downloads/cadenas/input/springerlink/target.txt \
+  --cb '' \
+  --out /home/ivan/Downloads/cadenas/output/springerlink/
+
+---
+IEEE
+---
+
+poetry run python -m src.zhang_metrics \
+  --csv-dir /home/ivan/Downloads/cadenas/input/ieee/ \
+  --targets-file /home/ivan/Downloads/cadenas/input/ieee/target.txt \
+  --cb '' \
+  --out /home/ivan/Downloads/cadenas/output/ieee/
 
 
 """

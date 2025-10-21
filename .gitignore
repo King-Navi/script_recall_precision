@@ -2,3 +2,4 @@ input/
 .venv/
 __pycache__/
 output/
+keywords/
