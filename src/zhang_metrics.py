@@ -121,15 +121,19 @@ def parse_csv_dir(csv_dir: str, extensions: tuple[str, ...] = (".csv", ".tsv")):
 def clean_doi(doi):
     if not doi:
         return None
-    s = str(doi).strip().replace("\n", " ")
+    s = str(doi)
+    s = unquote(s)
+    # elimina espacios visibles y NO visibles dentro del DOI
+    s = s.replace("\u200b","").replace("\u200c","").replace("\u200d","")
+    s = re.sub(r"\s+", "", s)
 
-    # Keep only real DOI resolver prefixes; do NOT strip arbitrary hosts
+    # prefijos de resolvers
     s = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", s, flags=re.I)
 
-    # Trim trailing punctuation, spaces, or closing brackets
-    s = re.sub(r"[\s\]\).;,]+$", "", s).strip()
+    # puntuación/residuos al final
+    s = re.sub(r"[\]\).;,]+$", "", s).strip()
 
-    # Validate final token truly looks like a DOI
+    # Valida patrón DOI
     if not DOI_RE.match(s):
         return None
     return s.lower()
@@ -257,6 +261,7 @@ def compute_metrics(args, out_path=None, count_duplicates=False):
     RC = 0.0 if ER == 0 else (TER / ER) * 100.0
     EF = 0.0 if TE == 0 else (TER / TE) * 100.0
 
+    dups = _summarize_duplicates(detail)
     report = {
         "CB": getattr(args, "cb", None),
         "ID": ID,
@@ -278,6 +283,7 @@ def compute_metrics(args, out_path=None, count_duplicates=False):
             "unique_ids_total": TE,
             "unique_dois_total": TE_doi,
         },
+        "duplicates": dups,
     }
 
     if out_path:
@@ -286,6 +292,30 @@ def compute_metrics(args, out_path=None, count_duplicates=False):
             json.dump(report, f, ensure_ascii=False, indent=2)
 
     return report, input_dir, detail
+
+def _summarize_duplicates(detail):
+    by_id = {}
+    by_doi = {}
+    by_fb  = {}
+    for d in detail:
+        cid = d.get("id")
+        doi = d.get("doi")
+        by_id[cid] = by_id.get(cid, 0) + 1
+        if doi:
+            by_doi[doi] = by_doi.get(doi, 0) + 1
+        elif cid and cid.startswith("ttlY:"):
+            by_fb[cid] = by_fb.get(cid, 0) + 1
+
+    dups_id = {k:v for k,v in by_id.items() if v>1}
+    dups_doi = {k:v for k,v in by_doi.items() if v>1}
+    dups_fb  = {k:v for k,v in by_fb.items() if v>1}
+
+    return {
+        "duplicates_collapsed_total": sum(v-1 for v in dups_id.values()),
+        "duplicates_by_doi": sorted(([k,v] for k,v in dups_doi.items()), key=lambda x: -x[1]),
+        "duplicates_by_fallback": sorted(([k,v] for k,v in dups_fb.items()), key=lambda x: -x[1]),
+    }
+
 
 def build_parser():
     p = argparse.ArgumentParser(description="Compute Zhang (2011) Sensitivity & Precision for a search.")
@@ -390,6 +420,18 @@ def main():
             print("  -", d)
     if args.out:
         print(f"\nSaved JSON report -> {out_path}")
+    
+    if report.get("duplicates"):
+        d = report["duplicates"]
+        print(f"\nDuplicados colapsados: {d['duplicates_collapsed_total']}")
+        if d["duplicates_by_doi"]:
+            print("  (por DOI, top 5):")
+            for doi, cnt in d["duplicates_by_doi"][:5]:
+                print(f"    - {doi} x{cnt}")
+        if d["duplicates_by_fallback"]:
+            print("  (por fallback title+year, top 5):")
+            for fb, cnt in d["duplicates_by_fallback"][:5]:
+                print(f"    - {fb} x{cnt}")
 
 
 """
@@ -401,7 +443,9 @@ PYTHONPATH=src \
 poetry run python -m src.zhang_metrics \
   --bibs-dir /home/ivan/Downloads/cadenas/input/acm \
   --targets-file /home/ivan/Downloads/cadenas/input/acm/target.txt \
-  --cb '("test case generation" OR "test data generation") AND ("multi-objective" OR "multiple objectives" OR Pareto) AND ("Search-Based Software Testing" OR SBST)' \
+  --cb '
+
+  ' \
   --out /home/ivan/Downloads/cadenas/output/acm/
 
   
@@ -440,7 +484,9 @@ IEEE
 poetry run python -m src.zhang_metrics \
   --csv-dir /home/ivan/Downloads/cadenas/input/ieee/ \
   --targets-file /home/ivan/Downloads/cadenas/input/ieee/target.txt \
-  --cb '' \
+  --cb '
+  
+  ' \
   --out /home/ivan/Downloads/cadenas/output/ieee/
 
 
